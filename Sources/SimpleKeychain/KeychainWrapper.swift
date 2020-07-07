@@ -1,0 +1,203 @@
+//
+//  KeychainWrapper.swift
+//  KeychainWrapper
+//
+//  Created by Jason Rendel on 9/23/14.
+//  Copyright (c) 2014 Jason Rendel. All rights reserved.
+//
+//    The MIT License (MIT)
+//
+//    Permission is hereby granted, free of charge, to any person obtaining a copy
+//    of this software and associated documentation files (the "Software"), to deal
+//    in the Software without restriction, including without limitation the rights
+//    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//    copies of the Software, and to permit persons to whom the Software is
+//    furnished to do so, subject to the following conditions:
+//
+//    The above copyright notice and this permission notice shall be included in all
+//    copies or substantial portions of the Software.
+//
+//    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//    SOFTWARE.
+import Foundation
+
+
+private let SecMatchLimit: String! = kSecMatchLimit as String
+private let SecReturnData: String! = kSecReturnData as String
+private let SecReturnPersistentRef: String! = kSecReturnPersistentRef as String
+private let SecValueData: String! = kSecValueData as String
+private let SecAttrAccessible: String! = kSecAttrAccessible as String
+private let SecClass: String! = kSecClass as String
+private let SecAttrService: String! = kSecAttrService as String
+private let SecAttrGeneric: String! = kSecAttrGeneric as String
+private let SecAttrAccount: String! = kSecAttrAccount as String
+private let SecAttrAccessGroup: String! = kSecAttrAccessGroup as String
+private let SecReturnAttributes: String = kSecReturnAttributes as String
+
+/// KeychainWrapper is a class to help make Keychain access in Swift more straightforward. It is designed to make accessing the Keychain services more like using NSUserDefaults, which is much more familiar to people.
+open class KeychainWrapper {
+
+    /// Default keychain wrapper access
+    public static let standard = KeychainWrapper()
+
+    /// ServiceName is used for the kSecAttrService property to uniquely identify this keychain accessor. If no service name is specified, KeychainWrapper will default to using the bundleIdentifier.
+    private (set) public var serviceName: String
+
+    /// AccessGroup is used for the kSecAttrAccessGroup property to identify which Keychain Access Group this entry belongs to. This allows you to use the KeychainWrapper with shared keychain access between different applications.
+    private (set) public var accessGroup: String?
+
+    private static let defaultServiceName: String = {
+        return Bundle.main.bundleIdentifier ?? "SwiftKeychainWrapper"
+    }()
+
+    private convenience init() {
+        self.init(serviceName: KeychainWrapper.defaultServiceName)
+    }
+
+    /// Create a custom instance of KeychainWrapper with a custom Service Name and optional custom access group.
+    ///
+    /// - parameter serviceName: The ServiceName for this instance. Used to uniquely identify all keys stored using this keychain wrapper instance.
+    /// - parameter accessGroup: Optional unique AccessGroup for this instance. Use a matching AccessGroup between applications to allow shared keychain access.
+    public init(serviceName: String, accessGroup: String? = nil) {
+        self.serviceName = serviceName
+        self.accessGroup = accessGroup
+    }
+
+    // MARK: Public Getters
+
+    /// Returns a string value for a specified key.
+    ///
+    /// - parameter forKey: The key to lookup data for.
+    /// - parameter withAccessibility: Optional accessibility to use when retrieving the keychain item.
+    /// - returns: The String associated with the key if it exists. If no data exists, or the data found cannot be encoded as a string, returns nil.
+    open func string(forKey key: String, withAccessibility accessibility: KeychainItemAccessibility? = nil) -> String? {
+        guard let keychainData = data(forKey: key, withAccessibility: accessibility) else {
+            return nil
+        }
+
+        return String(data: keychainData, encoding: String.Encoding.utf8) as String?
+    }
+
+    /// Returns a Data object for a specified key.
+    ///
+    /// - parameter forKey: The key to lookup data for.
+    /// - parameter withAccessibility: Optional accessibility to use when retrieving the keychain item.
+    /// - returns: The Data object associated with the key if it exists. If no data exists, returns nil.
+    open func data(forKey key: String, withAccessibility accessibility: KeychainItemAccessibility? = nil) -> Data? {
+        var keychainQueryDictionary = setupKeychainQueryDictionary(forKey: key, withAccessibility: accessibility)
+
+        // Limit search results to one
+        keychainQueryDictionary[SecMatchLimit] = kSecMatchLimitOne
+
+        // Specify we want Data/CFData returned
+        keychainQueryDictionary[SecReturnData] = kCFBooleanTrue
+
+        // Search
+        var result: AnyObject?
+        let status = SecItemCopyMatching(keychainQueryDictionary as CFDictionary, &result)
+
+        return status == noErr ? result as? Data : nil
+    }
+
+    // MARK: Public Setters
+
+    /// Save a String value to the keychain associated with a specified key. If a String value already exists for the given key, the string will be overwritten with the new value.
+    ///
+    /// - parameter value: The String value to save.
+    /// - parameter forKey: The key to save the String under.
+    /// - parameter withAccessibility: Optional accessibility to use when setting the keychain item.
+    /// - returns: True if the save was successful, false otherwise.
+    @discardableResult open func set(_ value: String, forKey key: String, withAccessibility accessibility: KeychainItemAccessibility? = nil) -> Bool {
+        if let data = value.data(using: .utf8) {
+            return set(data, forKey: key, withAccessibility: accessibility)
+        } else {
+            return false
+        }
+    }
+
+    /// Save a Data object to the keychain associated with a specified key. If data already exists for the given key, the data will be overwritten with the new value.
+    ///
+    /// - parameter value: The Data object to save.
+    /// - parameter forKey: The key to save the object under.
+    /// - parameter withAccessibility: Optional accessibility to use when setting the keychain item.
+    /// - returns: True if the save was successful, false otherwise.
+    @discardableResult open func set(_ value: Data, forKey key: String, withAccessibility accessibility: KeychainItemAccessibility? = nil) -> Bool {
+        var keychainQueryDictionary: [String:Any] = setupKeychainQueryDictionary(forKey: key, withAccessibility: accessibility)
+
+        keychainQueryDictionary[SecValueData] = value
+
+        if let accessibility = accessibility {
+            keychainQueryDictionary[SecAttrAccessible] = accessibility.keychainAttrValue
+        } else {
+            // Assign default protection - Protect the keychain entry so it's only valid when the device is unlocked
+            keychainQueryDictionary[SecAttrAccessible] = KeychainItemAccessibility.whenUnlocked.keychainAttrValue
+        }
+
+        let status: OSStatus = SecItemAdd(keychainQueryDictionary as CFDictionary, nil)
+
+        if status == errSecSuccess {
+            return true
+        } else if status == errSecDuplicateItem {
+            return update(value, forKey: key, withAccessibility: accessibility)
+        } else {
+            return false
+        }
+    }
+
+    /// Update existing data associated with a specified key name. The existing data will be overwritten by the new data.
+    private func update(_ value: Data, forKey key: String, withAccessibility accessibility: KeychainItemAccessibility? = nil) -> Bool {
+        var keychainQueryDictionary: [String:Any] = setupKeychainQueryDictionary(forKey: key, withAccessibility: accessibility)
+        let updateDictionary = [SecValueData:value]
+
+        // on update, only set accessibility if passed in
+        if let accessibility = accessibility {
+            keychainQueryDictionary[SecAttrAccessible] = accessibility.keychainAttrValue
+        }
+
+        // Update
+        let status: OSStatus = SecItemUpdate(keychainQueryDictionary as CFDictionary, updateDictionary as CFDictionary)
+
+        if status == errSecSuccess {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    /// Setup the keychain query dictionary used to access the keychain on iOS for a specified key name. Takes into account the Service Name and Access Group if one is set.
+    ///
+    /// - parameter forKey: The key this query is for
+    /// - parameter withAccessibility: Optional accessibility to use when setting the keychain item. If none is provided, will default to .WhenUnlocked
+    /// - returns: A dictionary with all the needed properties setup to access the keychain on iOS
+    private func setupKeychainQueryDictionary(forKey key: String, withAccessibility accessibility: KeychainItemAccessibility? = nil) -> [String:Any] {
+        // Setup default access as generic password (rather than a certificate, internet password, etc)
+        var keychainQueryDictionary: [String:Any] = [SecClass:kSecClassGenericPassword]
+
+        // Uniquely identify this keychain accessor
+        keychainQueryDictionary[SecAttrService] = serviceName
+
+        // Only set accessibiilty if its passed in, we don't want to default it here in case the user didn't want it set
+        if let accessibility = accessibility {
+            keychainQueryDictionary[SecAttrAccessible] = accessibility.keychainAttrValue
+        }
+
+        // Set the keychain access group if defined
+        if let accessGroup = self.accessGroup {
+            keychainQueryDictionary[SecAttrAccessGroup] = accessGroup
+        }
+
+        // Uniquely identify the account who will be accessing the keychain
+        let encodedIdentifier: Data? = key.data(using: String.Encoding.utf8)
+
+        keychainQueryDictionary[SecAttrGeneric] = encodedIdentifier
+
+        keychainQueryDictionary[SecAttrAccount] = encodedIdentifier
+
+        return keychainQueryDictionary
+    }
+}
